@@ -1,5 +1,7 @@
 ﻿#include "../../config.h"
 
+#define MATE_ENGINE
+#define USE_INFERIOR
 #if defined(MATE_ENGINE)
 
 #include <unordered_set>
@@ -117,11 +119,15 @@ namespace MateEngine
 		{
 			// ハッシュの上位32ビット
 			uint32_t hash_high; // 初期値 : 0
+			#ifdef USE_INFERIOR
+			Hand hand;
+			#endif
 
 			// TTEntryのインスタンスを作成したタイミングで先端ノードを表すよう1で初期化する
 			uint32_t pn; // 初期値 : 1
 			uint32_t dn; // 初期値 : 1
 
+			#ifdef USE_INFERIOR
 			// このTTEntryに関して探索したnode数(桁数足りてる？)
 			uint32_t num_searched; // 初期値 : 0
 
@@ -131,7 +137,28 @@ namespace MateEngine
 
 			// 置換表世代
 			uint16_t generation;
+			
+			void init(uint32_t hash_high_ , Hand hand_, uint16_t generation_)
+			{
+				hash_high = hash_high_;
+				hand = hand_;
+				pn = 1;
+				dn = 1;
+				minimum_distance = kInfiniteDepth;
+				num_searched = 0;
+				generation = generation_;
+			}
 
+			#else
+			// このTTEntryに関して探索したnode数(桁数足りてる？)
+			uint32_t num_searched; // 初期値 : 0
+
+			// ルートノードからの最短距離
+			// 初期値を∞として全てのノードより最短距離が長いとみなす
+			uint16_t minimum_distance; // 初期値 : kInfiniteDepth
+
+			// 置換表世代
+			uint16_t generation;
 			// TODO(nodchip): 指し手が1手しかない場合の手を追加する
 
 			// このTTEntryを初期化する。
@@ -144,15 +171,23 @@ namespace MateEngine
 				num_searched = 0;
 				generation = generation_;
 			}
+			#endif
 		};
+		#ifdef USE_INFERIOR
+		static_assert(sizeof(TTEntry) == 24, "");
+		#else
 		static_assert(sizeof(TTEntry) == 20, "");
-
+		#endif
 		// TTEntryを束ねたもの。
 		struct Cluster {
+			#ifdef USE_INFERIOR
+			static constexpr int kNumEntries = 2;
+			int padding[4];
+			#else
 			// TTEntry 20バイト×3 + 4(padding) == 64
 			static constexpr int kNumEntries = 3;
 			int padding;
-
+			#endif
 			TTEntry entries[kNumEntries];
 		};
 		// Clusterのサイズは、CacheLineSizeの整数倍であること。
@@ -168,16 +203,69 @@ namespace MateEngine
 		}
 
 		// 指定したKeyのTTEntryを返す。見つからなければ初期化された新規のTTEntryを返す。
+		#ifdef USE_INFERIOR
+		TTEntry& LookUp(Key key, Hand hand, Color root_color, bool or_node) {
+		#else
 		TTEntry& LookUp(Key key, Color root_color) {
+		#endif
 			auto& entries = tt[key & clusters_mask];
 			uint32_t hash_high = ((key >> 32) & ~1) | root_color;
 
 			// 検索条件に合致するエントリを返す
-
-			for (auto& entry : entries.entries)
-				if (hash_high == entry.hash_high && entry.generation == generation)
+			uint32_t i = 0;
+			for (auto& entry : entries.entries){
+				if (hash_high == entry.hash_high && entry.generation == generation){
+					#ifdef USE_INFERIOR
+					bool found_same = false;
+					uint32_t same_key = 0;
+					if(hand == entry.hand){
+						same_key = i;
+						found_same = true;
+					}
+					// keyが合致するエントリを見つけた場合
+					// 残りのエントリに優越関係を満たす局面があり証明済みの場合、それを返す
+					for (i++; i < sizeof(entries.entries) / sizeof(TTEntry); i++) {
+						TTEntry& entry_rest = entries.entries[i];
+						if (entry_rest.hash_high == 0) break;
+						if(hand == entry_rest.hand){
+							same_key = i;
+							found_same = true;
+						}
+						if(entry_rest.dn != 0 && entry_rest.pn != 0){
+							continue;
+						}
+						if (hash_high == entry_rest.hash_high) {
+							if(entry_rest.pn == 0){
+								if ((or_node && hand_is_equal_or_superior(hand, entry_rest.hand)) || (!or_node && hand_is_equal_or_superior(entry_rest.hand, hand))){
+									if(hand != entry_rest.hand){
+										//cout<<"mate "<<or_node<<","<<hand<<","<<entry_rest.hand<<endl;
+									}
+									entry_rest.generation = generation;
+									return entry_rest;
+								}
+							}else if(entry_rest.dn == 0){
+								// dlshogiではコメントアウトされていたが、千日手周りの不詰で変な挙動をしてる？
+								if ((or_node && hand_is_equal_or_superior(entry_rest.hand, hand)) || (!or_node && hand_is_equal_or_superior(hand, entry_rest.hand))){
+									entry_rest.generation = generation;
+									if(hand != entry_rest.hand){
+										//cout<<"nomate "<<or_node<<","<<hand<<","<<entry_rest.hand<<endl;
+									}
+									
+									return entry_rest;
+								}
+							}
+						}
+					}
+					if(found_same){
+						return entries.entries[same_key];
+					}
+					break;
+					#else
 					return entry;
-
+					#endif
+				}
+				++i;
+			}
 			// 合致するTTEntryが見つからなかったので空きエントリーを探して返す
 
 			for (auto& entry : entries.entries)
@@ -185,7 +273,11 @@ namespace MateEngine
 				// ※ hash_high == 0を条件にしてしまうと 1/2^32ぐらいの確率でいつまでも書き込めないentryができてしまう。
 				if (entry.generation != generation)
 				{
+					#ifdef USE_INFERIOR
+					entry.init(hash_high , hand, generation);
+					#else
 					entry.init(hash_high , generation);
+					#endif
 					return entry;
 				}
 
@@ -202,13 +294,20 @@ namespace MateEngine
 					best_node_searched = entry.num_searched;
 				}
 			}
-
-			best_entry->init(hash_high , generation);
+			#ifdef USE_INFERIOR
+			best_entry ->init(hash_high , hand, generation);
+			#else
+			best_entry -> init(hash_high , generation);
+			#endif
 			return *best_entry;
 		}
 
 		TTEntry& LookUp(Position& n, Color root_color) {
+			#ifdef USE_INFERIOR
+			auto& out = LookUp(n.board_key(), n.hand_of(n.side_to_move()), root_color, root_color==n.side_to_move());
+			#else
 			auto& out = LookUp(n.key(), root_color);
+			#endif
 			/*
 			if ((out.pn == 100000000 && out.dn !=0 ) || (out.dn == 100000000 && out.pn !=0 )){
 				cout<<"illeagal matejudge"<<out.pn<<","<<out.dn<<endl;
@@ -220,7 +319,13 @@ namespace MateEngine
 
 		// moveを指した後の子ノードの置換表エントリを返す
 		TTEntry& LookUpChildEntry(Position& n, Move move, Color root_color) {
+			#ifdef USE_INFERIOR
+			Key board_key = n.board_key_after(move);
+			Hand hand = n.hand_of(Color(1 - int(n.side_to_move())));
+			auto& out = LookUp(board_key, hand, root_color, root_color!=n.side_to_move());
+			#else
 			auto& out = LookUp(n.key_after(move), root_color);
+			#endif
 			/*
 			if ((out.pn == 100000000 && out.dn !=0 ) || (out.dn == 100000000 && out.pn !=0 )){
 				cout<<"illeagal matejudge"<<out.pn<<","<<out.dn<<endl;
@@ -335,7 +440,6 @@ namespace MateEngine
 	// 置換表クラスの実体
 	TranspositionTable transposition_table;
 
-	bool fuckin_switch = false;
 
 
 void vis_hash(const TranspositionTable::TTEntry& entry, Position& pos, const Color root_color){
@@ -445,14 +549,6 @@ void vis_hash(const TranspositionTable::TTEntry& entry, Position& pos, const Col
 		// 	return;
 		// }
 
-	
-					if (entry.dn == 99989826){
-						cout<<"ohfuck prune"<<endl;
-						cout<<n<<endl;
-						cout<<thdn<<","<<thpn<<","<<entry.dn<<","<<entry.pn<<endl;			
-					}
-
-
 		if (thdn <= entry.dn || thpn <= entry.pn){
 			return;
 		}
@@ -509,7 +605,6 @@ void vis_hash(const TranspositionTable::TTEntry& entry, Position& pos, const Col
 	
 		while (!Threads.stop.load(std::memory_order_relaxed)) {
 			++entry.num_searched;
-
 			uint32_t best_pn = kInfinitePnDn;
 			uint32_t second_best_pn = kInfinitePnDn;
 			uint32_t best_dn = kInfinitePnDn;
@@ -579,28 +674,12 @@ void vis_hash(const TranspositionTable::TTEntry& entry, Position& pos, const Col
 				if (thpn <= best_pn || thdn <= sum_dn){
 					entry.pn = best_pn;
 					entry.dn = std::min(kInfinitePnDn, sum_dn);
-					if (entry.dn == 99989826){
-						cout<<"ohfuck pn"<<endl;
-						cout<<n<<endl;
-						for (const auto& move : move_picker) {
-							const auto& child_entry = transposition_table.LookUpChildEntry(n, move, root_color);
-							cout<<move<<child_entry.dn<<","<<child_entry.pn<<endl;
-						}			
-					}
 					return;
 				}
 			}else{
 				if (thdn <= best_dn || thpn <= sum_pn){
 					entry.pn = std::min(kInfinitePnDn, sum_pn);
 					entry.dn = best_dn;
-					if (entry.dn == 99989826){
-						cout<<"ohfuck dn"<<endl;
-						cout<<n<<endl;
-						for (const auto& move : move_picker) {
-							const auto& child_entry = transposition_table.LookUpChildEntry(n, move, root_color);
-							cout<<move<<child_entry.dn<<","<<child_entry.pn<<endl;
-						}			
-					}
 					return;
 				}
 			}

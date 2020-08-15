@@ -11,7 +11,6 @@
 #include <deque>
 #include <memory> // std::unique_ptr
 
-
 #if defined(EVAL_NNUE)
 #include "eval/nnue/nnue_accumulator.h"
 #endif
@@ -446,7 +445,9 @@ public:
 	// 将棋だとこの計算にそこそこ時間がかかるので、通常の探索部でprefetch用に
 	// これを計算するのはあまり得策ではないが、詰将棋ルーチンでは置換表を投機的に
 	// prefetchできるとずいぶん速くなるのでこの関数を用意しておく。
+	Key board_key() const { return st->board_key(); }
 	Key key_after(Move m) const;
+	Key board_key_after(Move m) const;
 #endif
 
 	// --- misc

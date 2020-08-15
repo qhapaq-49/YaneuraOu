@@ -164,6 +164,7 @@ namespace Search {
 #endif
 #if defined(MATE_ENGINE)
 		std::vector<Move> pv_check;
+		bool matedebug = false;
 #endif
 	};
 
